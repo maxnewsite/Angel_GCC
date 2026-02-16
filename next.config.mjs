@@ -1,5 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  output: 'standalone', // Required for Docker/Cloud Run deployment
   experimental: {
     serverComponentsExternalPackages: ["@react-pdf/renderer"],
   },

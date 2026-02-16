@@ -1,0 +1,15 @@
+// Health check endpoint for Google Cloud Run
+import { NextResponse } from 'next/server';
+
+export const dynamic = 'force-dynamic';
+
+export async function GET() {
+  return NextResponse.json(
+    {
+      status: 'healthy',
+      timestamp: new Date().toISOString(),
+      service: 'angel-ai-analyst'
+    },
+    { status: 200 }
+  );
+}
