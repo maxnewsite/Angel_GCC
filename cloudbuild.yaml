@@ -50,11 +50,11 @@ steps:
 
 availableSecrets:
   secretManager:
-  - versionName: projects/$PROJECT_ID/secrets/supabase-url/versions/latest
+  - versionName: projects/$PROJECT_ID/secrets/NEXT_PUBLIC_SUPABASE_URL/versions/latest
     env: 'NEXT_PUBLIC_SUPABASE_URL'
-  - versionName: projects/$PROJECT_ID/secrets/supabase-anon-key/versions/latest
+  - versionName: projects/$PROJECT_ID/secrets/NEXT_PUBLIC_SUPABASE_ANON_KEY/versions/latest
     env: 'NEXT_PUBLIC_SUPABASE_ANON_KEY'
-  - versionName: projects/$PROJECT_ID/secrets/anthropic-api-key/versions/latest
+  - versionName: projects/$PROJECT_ID/secrets/ANTHROPIC_API_KEY/versions/latest
     env: 'ANTHROPIC_API_KEY'
 
 # Store images in Container Registry
