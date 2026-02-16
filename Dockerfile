@@ -16,20 +16,13 @@ RUN npm ci && \
 FROM base AS builder
 WORKDIR /app
 
-# Accept build arguments for Next.js public env vars
-ARG NEXT_PUBLIC_SUPABASE_URL
-ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
-
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 
 # Set environment variables for build
+# NEXT_PUBLIC_* vars are read from .env.production by Next.js at build time
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_ENV=production
-
-# Pass build args as env vars for Next.js build
-ENV NEXT_PUBLIC_SUPABASE_URL=${NEXT_PUBLIC_SUPABASE_URL:-https://placeholder.supabase.co}
-ENV NEXT_PUBLIC_SUPABASE_ANON_KEY=${NEXT_PUBLIC_SUPABASE_ANON_KEY:-placeholder_key}
 
 # Build Next.js application
 RUN npm run build

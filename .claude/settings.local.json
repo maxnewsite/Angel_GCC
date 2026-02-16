@@ -20,7 +20,17 @@
       "Bash(git remote add:*)",
       "Bash(git branch:*)",
       "Bash(git push:*)",
-      "Bash(git remote get-url:*)"
+      "Bash(git remote get-url:*)",
+      "Bash(gcloud projects get-iam-policy:*)",
+      "Bash(gcloud projects add-iam-policy-binding:*)",
+      "Bash(gcloud builds submit:*)",
+      "Bash(gcloud projects describe:*)",
+      "Bash(gcloud secrets list:*)",
+      "Bash(gcloud config get-value:*)",
+      "Bash(gcloud projects list:*)",
+      "Bash(gcloud config set:*)",
+      "Bash(gcloud builds log:*)",
+      "Bash(gcloud run services describe:*)"
     ]
   }
 }
