@@ -2,10 +2,14 @@
 # Triggers: Push to main branch on GitHub
 
 steps:
-  # Build the container image
+  # Build the container image with Supabase public keys
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'build'
+      - '--build-arg'
+      - 'NEXT_PUBLIC_SUPABASE_URL=https://pkwbzhucmhfaoljugmgs.supabase.co'
+      - '--build-arg'
+      - 'NEXT_PUBLIC_SUPABASE_ANON_KEY=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InBrd2J6aHVjbWhmYW9sanVnbWdzIiwicm9sZSI6ImFub24iLCJpYXQiOjE3MzUwNDMxMjAsImV4cCI6MjA1MDYxOTEyMH0.XLQ5F8bBqmqGM4WxzqiPc1sTiGhxhsQJHkb0ozDi7WQ'
       - '-t'
       - 'gcr.io/$PROJECT_ID/angel-gcc:$COMMIT_SHA'
       - '-t'
