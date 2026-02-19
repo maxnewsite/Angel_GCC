@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS submissions (
   use_of_funds TEXT,
   status TEXT NOT NULL DEFAULT 'submitted'
     CHECK (status IN ('submitted', 'in_review', 'analyzing', 'completed', 'rejected')),
+  rejection_reason TEXT,
   created_at TIMESTAMPTZ DEFAULT now(),
   updated_at TIMESTAMPTZ DEFAULT now()
 );

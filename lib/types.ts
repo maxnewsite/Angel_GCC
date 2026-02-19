@@ -21,6 +21,7 @@ export interface Submission {
   funding_ask: string | null;
   use_of_funds: string | null;
   status: "submitted" | "in_review" | "analyzing" | "completed" | "rejected";
+  rejection_reason: string | null;
   created_at: string;
   updated_at: string;
   // joined fields

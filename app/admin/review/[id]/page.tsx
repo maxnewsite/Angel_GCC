@@ -21,6 +21,10 @@ export default function ReviewPage() {
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeError, setAnalyzeError] = useState("");
   const [analyzeProgress, setAnalyzeProgress] = useState("");
+  const [rejecting, setRejecting] = useState(false);
+  const [showRejectConfirm, setShowRejectConfirm] = useState(false);
+  const [rejectReason, setRejectReason] = useState("");
+  const [rejectError, setRejectError] = useState("");
 
   useEffect(() => {
     async function load() {
@@ -52,6 +56,30 @@ export default function ReviewPage() {
       a.download = doc.file_name;
       a.click();
       URL.revokeObjectURL(url);
+    }
+  }
+
+  async function rejectSubmission() {
+    setRejecting(true);
+    setRejectError("");
+    try {
+      const { error } = await supabase
+        .from("submissions")
+        .update({
+          status: "rejected",
+          rejection_reason: rejectReason.trim() || null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", id);
+
+      if (error) throw error;
+
+      setSubmission((prev) => prev ? { ...prev, status: "rejected" } : prev);
+      setShowRejectConfirm(false);
+    } catch (err) {
+      setRejectError(err instanceof Error ? err.message : "Failed to reject submission");
+    } finally {
+      setRejecting(false);
     }
   }
 
@@ -130,12 +158,14 @@ export default function ReviewPage() {
           variant={
             submission.status === "completed"
               ? "success"
+              : submission.status === "rejected"
+              ? "destructive"
               : submission.status === "analyzing"
               ? "default"
               : "secondary"
           }
         >
-          {submission.status}
+          {submission.status === "rejected" ? "Rejected" : submission.status}
         </Badge>
       </div>
 
@@ -257,9 +287,11 @@ export default function ReviewPage() {
       </Card>
 
       {/* AI Analysis Authorization */}
-      <Card className="border-2 border-blue-300">
+      <Card className={`border-2 ${submission.status === "rejected" ? "border-red-300 bg-red-50/30" : "border-blue-300"}`}>
         <CardHeader>
-          <h3 className="text-lg font-semibold text-blue-700">AI Analysis</h3>
+          <h3 className={`text-lg font-semibold ${submission.status === "rejected" ? "text-red-700" : "text-blue-700"}`}>
+            AI Analysis
+          </h3>
         </CardHeader>
         <CardContent>
           {submission.status === "completed" ? (
@@ -267,6 +299,35 @@ export default function ReviewPage() {
               <p className="text-green-600 font-medium mb-3">Analysis already completed.</p>
               <Button onClick={() => router.push(`/admin/report/${id}`)}>
                 View Report
+              </Button>
+            </div>
+          ) : submission.status === "rejected" ? (
+            <div className="text-center py-6">
+              <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-red-100 mb-3">
+                <span className="text-2xl">✕</span>
+              </div>
+              <p className="text-red-700 font-semibold text-lg mb-1">Application Rejected</p>
+              <p className="text-sm text-slate-500 mb-4">
+                This submission has been moved to the rejected bucket.
+              </p>
+              {submission.rejection_reason && (
+                <div className="rounded-lg bg-white border border-red-200 px-4 py-3 text-sm text-slate-700 mb-4 text-left max-w-md mx-auto">
+                  <span className="text-xs font-semibold text-slate-500 uppercase block mb-1">Rejection Reason</span>
+                  {submission.rejection_reason}
+                </div>
+              )}
+              <Button
+                variant="ghost"
+                className="text-slate-500 text-sm"
+                onClick={async () => {
+                  await supabase
+                    .from("submissions")
+                    .update({ status: "in_review", rejection_reason: null, updated_at: new Date().toISOString() })
+                    .eq("id", id);
+                  setSubmission((prev) => prev ? { ...prev, status: "in_review" } : prev);
+                }}
+              >
+                Undo Rejection
               </Button>
             </div>
           ) : analyzing ? (
@@ -277,9 +338,47 @@ export default function ReviewPage() {
                 The AI is analyzing the pitch deck, conducting market research, scoring 7 criteria, and detecting flags...
               </p>
             </div>
+          ) : showRejectConfirm ? (
+            <div className="py-4 space-y-4">
+              <div className="rounded-lg bg-red-50 border border-red-200 p-4">
+                <p className="text-sm font-semibold text-red-800 mb-1">Reject this application?</p>
+                <p className="text-xs text-red-600 mb-3">
+                  The submission will be moved to the <strong>rejected</strong> bucket and no AI analysis will be run.
+                </p>
+                <label className="text-xs font-semibold text-slate-600 uppercase block mb-1">
+                  Reason for rejection <span className="font-normal normal-case text-slate-400">(optional)</span>
+                </label>
+                <textarea
+                  className="w-full rounded-md border border-red-200 bg-white px-3 py-2 text-sm text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-red-300 resize-none"
+                  rows={3}
+                  placeholder="e.g. Outside investment thesis, insufficient traction, duplicate submission..."
+                  value={rejectReason}
+                  onChange={(e) => setRejectReason(e.target.value)}
+                />
+                {rejectError && (
+                  <p className="text-xs text-red-600 mt-2">{rejectError}</p>
+                )}
+              </div>
+              <div className="flex gap-3 justify-center">
+                <Button
+                  variant="ghost"
+                  onClick={() => { setShowRejectConfirm(false); setRejectReason(""); setRejectError(""); }}
+                  disabled={rejecting}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={rejectSubmission}
+                  disabled={rejecting}
+                  className="bg-red-600 hover:bg-red-700 text-white px-6"
+                >
+                  {rejecting ? "Rejecting..." : "Confirm Rejection"}
+                </Button>
+              </div>
+            </div>
           ) : (
             <div className="text-center py-4">
-              <p className="text-sm text-slate-600 mb-4">
+              <p className="text-sm text-slate-600 mb-6">
                 Authorize the AI to perform a comprehensive analysis including 7-criteria scoring,
                 YC-style flag detection, market research, and generate a full investment report.
               </p>
@@ -288,9 +387,18 @@ export default function ReviewPage() {
                   {analyzeError}
                 </div>
               )}
-              <Button onClick={authorizeAnalysis} className="px-8">
-                Authorize AI Analysis
-              </Button>
+              <div className="flex items-center justify-center gap-3">
+                <Button onClick={authorizeAnalysis} className="px-8">
+                  Authorize AI Analysis
+                </Button>
+                <Button
+                  variant="ghost"
+                  className="px-6 text-red-600 hover:bg-red-50 hover:text-red-700 border border-red-200"
+                  onClick={() => setShowRejectConfirm(true)}
+                >
+                  Reject Application
+                </Button>
+              </div>
             </div>
           )}
         </CardContent>
