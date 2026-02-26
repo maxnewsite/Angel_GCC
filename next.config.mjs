@@ -2,8 +2,9 @@
 const nextConfig = {
   output: 'standalone', // Required for Docker/Cloud Run deployment
 
-  // Moved from experimental in Next.js 16
-  serverExternalPackages: ["@react-pdf/renderer"],
+  // pdfkit is a native Node.js module — keep it external so Turbopack
+  // does not attempt to bundle it for the browser bundle.
+  serverExternalPackages: ["pdfkit"],
 
   // Next.js 16 uses Turbopack by default, add empty config to silence warning
   turbopack: {},

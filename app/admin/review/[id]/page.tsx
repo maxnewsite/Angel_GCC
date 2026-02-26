@@ -21,6 +21,10 @@ export default function ReviewPage() {
   const [analyzing, setAnalyzing] = useState(false);
   const [analyzeError, setAnalyzeError] = useState("");
   const [analyzeProgress, setAnalyzeProgress] = useState("");
+  const [analyzeStep, setAnalyzeStep] = useState(0);
+  const [analyzeTotal, setAnalyzeTotal] = useState(6);
+  const [selectedModel, setSelectedModel] = useState("claude-haiku-4-5-20251001");
+  const [extractionStats, setExtractionStats] = useState<{ fieldsTotal: number; fieldsPopulated: number; wordCount: number } | null>(null);
   const [rejecting, setRejecting] = useState(false);
   const [showRejectConfirm, setShowRejectConfirm] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
@@ -86,36 +90,61 @@ export default function ReviewPage() {
   async function authorizeAnalysis() {
     setAnalyzing(true);
     setAnalyzeError("");
+    setAnalyzeStep(0);
     setAnalyzeProgress("Starting AI analysis...");
+    setExtractionStats(null);
 
-    // Update status to analyzing
     await supabase
       .from("submissions")
       .update({ status: "analyzing", updated_at: new Date().toISOString() })
       .eq("id", id);
-
     setSubmission((prev) => prev ? { ...prev, status: "analyzing" } : prev);
 
     try {
-      setAnalyzeProgress("AI is analyzing the submission... This may take 1-2 minutes.");
       const response = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ submission_id: id }),
+        body: JSON.stringify({ submission_id: id, model: selectedModel }),
       });
 
-      if (!response.ok) {
-        const err = await response.json();
-        throw new Error(err.error || "Analysis failed");
-      }
+      if (!response.body) throw new Error("No response stream");
 
-      setAnalyzeProgress("Analysis complete! Redirecting to report...");
-      setTimeout(() => {
-        router.push(`/admin/report/${id}`);
-      }, 1500);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? ""; // keep incomplete last line
+
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          const data = JSON.parse(line.slice(6)) as {
+            step?: number;
+            total?: number;
+            message?: string;
+            done?: boolean;
+            error?: string;
+            extractionStats?: { fieldsTotal: number; fieldsPopulated: number; wordCount: number };
+          };
+
+          if (data.error) throw new Error(data.error);
+          if (data.step !== undefined) setAnalyzeStep(data.step);
+          if (data.total !== undefined) setAnalyzeTotal(data.total);
+          if (data.message) setAnalyzeProgress(data.message);
+          if (data.extractionStats) setExtractionStats(data.extractionStats);
+
+          if (data.done) {
+            setTimeout(() => router.push(`/admin/report/${id}`), 1200);
+          }
+        }
+      }
     } catch (err) {
       setAnalyzeError(err instanceof Error ? err.message : "Analysis failed");
-      // Revert status
       await supabase
         .from("submissions")
         .update({ status: "in_review", updated_at: new Date().toISOString() })
@@ -287,21 +316,26 @@ export default function ReviewPage() {
       </Card>
 
       {/* AI Analysis Authorization */}
-      <Card className={`border-2 ${submission.status === "rejected" ? "border-red-300 bg-red-50/30" : "border-blue-300"}`}>
+      <Card className={`border-2 ${
+        submission.status === "rejected"
+          ? "border-red-300 bg-red-50/30"
+          : submission.status === "completed"
+          ? "border-green-300 bg-green-50/20"
+          : "border-blue-300"
+      }`}>
         <CardHeader>
-          <h3 className={`text-lg font-semibold ${submission.status === "rejected" ? "text-red-700" : "text-blue-700"}`}>
+          <h3 className={`text-lg font-semibold ${
+            submission.status === "rejected"
+              ? "text-red-700"
+              : submission.status === "completed"
+              ? "text-green-700"
+              : "text-blue-700"
+          }`}>
             AI Analysis
           </h3>
         </CardHeader>
         <CardContent>
-          {submission.status === "completed" ? (
-            <div className="text-center py-4">
-              <p className="text-green-600 font-medium mb-3">Analysis already completed.</p>
-              <Button onClick={() => router.push(`/admin/report/${id}`)}>
-                View Report
-              </Button>
-            </div>
-          ) : submission.status === "rejected" ? (
+          {submission.status === "rejected" ? (
             <div className="text-center py-6">
               <div className="inline-flex items-center justify-center w-12 h-12 rounded-full bg-red-100 mb-3">
                 <span className="text-2xl">✕</span>
@@ -331,12 +365,67 @@ export default function ReviewPage() {
               </Button>
             </div>
           ) : analyzing ? (
-            <div className="text-center py-8">
-              <div className="inline-block h-8 w-8 animate-spin rounded-full border-4 border-blue-600 border-r-transparent mb-4" />
-              <p className="text-blue-600 font-medium">{analyzeProgress}</p>
-              <p className="text-xs text-slate-400 mt-2">
-                The AI is analyzing the pitch deck, conducting market research, scoring 7 criteria, and detecting flags...
-              </p>
+            <div className="py-6">
+              {/* Progress bar */}
+              <div className="mb-5">
+                <div className="flex justify-between items-center mb-2">
+                  <span className="text-sm font-medium text-blue-700">{analyzeProgress}</span>
+                  <span className="text-xs text-slate-400">
+                    {analyzeStep > 0 ? `${analyzeStep} / ${analyzeTotal}` : ""}
+                  </span>
+                </div>
+                <div className="h-2 w-full bg-blue-100 rounded-full overflow-hidden">
+                  <div
+                    className="h-2 bg-blue-600 rounded-full transition-all duration-700 ease-out"
+                    style={{ width: analyzeTotal > 0 ? `${Math.round((analyzeStep / analyzeTotal) * 100)}%` : "4%" }}
+                  />
+                </div>
+              </div>
+
+              {/* Step list */}
+              <div className="space-y-2">
+                {[
+                  "Extracting pitch deck data",
+                  "Conducting market research",
+                  "Scoring 7 investment criteria",
+                  "Detecting YC-style green & red flags",
+                  "Generating investment recommendation",
+                  "Saving analysis report",
+                ].map((label, i) => {
+                  const stepNum = i + 1;
+                  const isDone = analyzeStep > stepNum;
+                  const isActive = analyzeStep === stepNum;
+                  const showStats = stepNum === 1 && extractionStats !== null && (isDone || isActive);
+                  return (
+                    <div
+                      key={i}
+                      className={`flex items-start gap-3 text-sm rounded-lg px-3 py-2 transition-colors ${
+                        isDone
+                          ? "text-green-700 bg-green-50"
+                          : isActive
+                          ? "text-blue-700 bg-blue-50"
+                          : "text-slate-400"
+                      }`}
+                    >
+                      <span className="w-5 text-center shrink-0 mt-0.5">
+                        {isDone ? "✓" : isActive ? (
+                          <span className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-blue-600 border-r-transparent" />
+                        ) : "○"}
+                      </span>
+                      <div>
+                        <span>{label}</span>
+                        {showStats && (
+                          <p className={`text-xs mt-0.5 ${isDone ? "text-green-600" : "text-blue-500"}`}>
+                            {extractionStats.fieldsTotal > 0
+                              ? `${extractionStats.fieldsPopulated}/${extractionStats.fieldsTotal} fields · ~${extractionStats.wordCount} words`
+                              : `~${extractionStats.wordCount} words extracted`}
+                          </p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           ) : showRejectConfirm ? (
             <div className="py-4 space-y-4">
@@ -377,28 +466,88 @@ export default function ReviewPage() {
               </div>
             </div>
           ) : (
-            <div className="text-center py-4">
-              <p className="text-sm text-slate-600 mb-6">
-                Authorize the AI to perform a comprehensive analysis including 7-criteria scoring,
-                YC-style flag detection, market research, and generate a full investment report.
-              </p>
-              {analyzeError && (
-                <div className="rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700 mb-4">
-                  {analyzeError}
+            <div className="py-4">
+              {/* Model selector */}
+              <div className="mb-5">
+                <label className="text-xs font-semibold text-slate-500 uppercase block mb-2">
+                  AI Model
+                </label>
+                <div className="grid grid-cols-3 gap-2">
+                  {[
+                    { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", desc: "Fast · Economical" },
+                    { id: "claude-sonnet-4-6",         label: "Sonnet 4.6", desc: "Balanced · Recommended" },
+                    { id: "claude-opus-4-6",           label: "Opus 4.6",  desc: "Most Capable · Slower" },
+                  ].map((m) => (
+                    <button
+                      key={m.id}
+                      onClick={() => setSelectedModel(m.id)}
+                      className={`rounded-xl border-2 px-3 py-2.5 text-left transition-all ${
+                        selectedModel === m.id
+                          ? "border-blue-600 bg-blue-50"
+                          : "border-slate-200 bg-white hover:border-blue-300"
+                      }`}
+                    >
+                      <div className={`text-sm font-semibold ${selectedModel === m.id ? "text-blue-700" : "text-slate-700"}`}>
+                        {m.label}
+                      </div>
+                      <div className="text-xs text-slate-500 mt-0.5">{m.desc}</div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {submission.status === "completed" ? (
+                /* Re-run section for completed analyses */
+                <div>
+                  <div className="rounded-lg bg-green-50 border border-green-200 px-4 py-3 mb-4 flex items-center justify-between">
+                    <div>
+                      <p className="text-sm font-medium text-green-800">Analysis completed.</p>
+                      <p className="text-xs text-green-700 mt-0.5">You can view the existing report or re-run with a different model.</p>
+                    </div>
+                    <Button onClick={() => router.push(`/admin/report/${id}`)} className="shrink-0 ml-4">
+                      View Report
+                    </Button>
+                  </div>
+                  {analyzeError && (
+                    <div className="rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700 mb-4">
+                      {analyzeError}
+                    </div>
+                  )}
+                  <div className="text-center">
+                    <Button
+                      onClick={authorizeAnalysis}
+                      className="px-8 bg-amber-600 hover:bg-amber-700"
+                    >
+                      Re-run AI Analysis
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                /* Initial run section */
+                <div className="text-center">
+                  <p className="text-sm text-slate-600 mb-4">
+                    Authorize the AI to perform a comprehensive analysis including 7-criteria scoring,
+                    YC-style flag detection, market research, and generate a full investment report.
+                  </p>
+                  {analyzeError && (
+                    <div className="rounded-lg bg-red-50 border border-red-200 px-4 py-3 text-sm text-red-700 mb-4">
+                      {analyzeError}
+                    </div>
+                  )}
+                  <div className="flex items-center justify-center gap-3">
+                    <Button onClick={authorizeAnalysis} className="px-8">
+                      Authorize AI Analysis
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      className="px-6 text-red-600 hover:bg-red-50 hover:text-red-700 border border-red-200"
+                      onClick={() => setShowRejectConfirm(true)}
+                    >
+                      Reject Application
+                    </Button>
+                  </div>
                 </div>
               )}
-              <div className="flex items-center justify-center gap-3">
-                <Button onClick={authorizeAnalysis} className="px-8">
-                  Authorize AI Analysis
-                </Button>
-                <Button
-                  variant="ghost"
-                  className="px-6 text-red-600 hover:bg-red-50 hover:text-red-700 border border-red-200"
-                  onClick={() => setShowRejectConfirm(true)}
-                >
-                  Reject Application
-                </Button>
-              </div>
             </div>
           )}
         </CardContent>

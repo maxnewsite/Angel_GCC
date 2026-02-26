@@ -54,7 +54,10 @@ export default function ReportPage() {
         body: JSON.stringify({ submission_id: id }),
       });
 
-      if (!response.ok) throw new Error("PDF generation failed");
+      if (!response.ok) {
+        const errData = await response.json().catch(() => null);
+        throw new Error(errData?.error || "PDF generation failed");
+      }
 
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
@@ -65,7 +68,7 @@ export default function ReportPage() {
       URL.revokeObjectURL(url);
     } catch (err) {
       console.error("PDF download error:", err);
-      alert("Failed to generate PDF. Please try again.");
+      alert(err instanceof Error ? err.message : "Failed to generate PDF. Please try again.");
     }
     setDownloading(false);
   }

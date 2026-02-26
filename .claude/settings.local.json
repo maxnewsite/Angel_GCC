@@ -31,7 +31,10 @@
       "Bash(gcloud config set:*)",
       "Bash(gcloud builds log:*)",
       "Bash(gcloud run services describe:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(ls:*)",
+      "Bash(python:*)",
+      "Bash(tail:*)"
     ]
   }
 }
