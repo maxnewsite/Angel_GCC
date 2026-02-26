@@ -81,7 +81,7 @@ function computeExtractionStats(
       const s = String(v).trim().toLowerCase();
       return s.length > 0 && !PLACEHOLDER_VALUES.has(s);
     }).length;
-    const wordCount = values.reduce((sum, v) => {
+    const wordCount = values.reduce((sum: number, v) => {
       if (v === null || v === undefined) return sum;
       return sum + countWords(String(v));
     }, 0);
