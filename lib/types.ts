@@ -46,6 +46,7 @@ export interface CriterionScore {
   weight: number;
   score: number;
   rationale: string;
+  confidence?: "low" | "medium" | "high";
 }
 
 export interface Flag {
@@ -74,5 +75,24 @@ export interface AnalysisReport {
   market_research: MarketResearch;
   detailed_rationale: string;
   raw_ai_responses: Record<string, unknown>;
+  insights?: ReportInsights | null;
   generated_at: string;
+}
+
+export interface ReportInsights {
+  model?: string;
+  key_strengths?: string[];
+  key_risks?: string[];
+  due_diligence_questions?: string[];
+  missing_information?: string[];
+  weighted_score?: number;
+  score_adjustment?: number;
+  warnings?: string[];
+  deck?: {
+    one_liner?: string;
+    stage?: string;
+    sector?: string;
+    hq_location?: string;
+    website?: string;
+  };
 }

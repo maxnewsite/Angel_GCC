@@ -1,14 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
+import { requireAdmin } from "@/lib/supabase/require-admin";
 
 export async function DELETE(request: NextRequest) {
+  const supabase = createServiceClient();
+  const denied = await requireAdmin(request, supabase);
+  if (denied) return denied;
+
   const { submission_id } = await request.json();
 
   if (!submission_id) {
     return NextResponse.json({ error: "submission_id required" }, { status: 400 });
   }
-
-  const supabase = createServiceClient();
 
   // 1. Fetch all documents so we can remove their storage files
   const { data: documents } = await supabase

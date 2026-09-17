@@ -120,6 +120,7 @@ CREATE TABLE IF NOT EXISTS analysis_reports (
   market_research JSONB DEFAULT '{}',
   detailed_rationale TEXT,
   raw_ai_responses JSONB DEFAULT '{}',
+  insights JSONB DEFAULT '{}',
   generated_at TIMESTAMPTZ DEFAULT now()
 );
 

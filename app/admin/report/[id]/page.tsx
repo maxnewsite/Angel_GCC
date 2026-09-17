@@ -12,6 +12,8 @@ import { ScoreMeter } from "@/components/ScoreMeter";
 import { CriteriaScores } from "@/components/CriteriaScores";
 import { FlagsList } from "@/components/FlagsList";
 import type { Submission, AnalysisReport } from "@/lib/types";
+import { authFetch } from "@/lib/api-client";
+import { MODELS } from "@/lib/models";
 
 export default function ReportPage() {
   const { id } = useParams<{ id: string }>();
@@ -48,7 +50,7 @@ export default function ReportPage() {
   async function downloadPDF() {
     setDownloading(true);
     try {
-      const response = await fetch("/api/report-pdf", {
+      const response = await authFetch("/api/report-pdf", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ submission_id: id }),
@@ -88,6 +90,15 @@ export default function ReportPage() {
     );
   }
 
+  const insights = report.insights ?? {};
+  const modelName = MODELS.find((m) => m.id === insights.model)?.name ?? insights.model;
+  const takeaways = [
+    { title: "Key Strengths", items: insights.key_strengths, color: "text-green-700", dot: "bg-green-500" },
+    { title: "Key Risks", items: insights.key_risks, color: "text-red-700", dot: "bg-red-500" },
+    { title: "Due Diligence Questions", items: insights.due_diligence_questions, color: "text-blue-700", dot: "bg-blue-500" },
+    { title: "Missing From the Deck", items: insights.missing_information, color: "text-slate-700", dot: "bg-slate-400" },
+  ].filter((t) => (t.items ?? []).length > 0);
+
   const marketResearch = report.market_research as {
     market_size?: string;
     competitors?: string[];
@@ -108,17 +119,36 @@ export default function ReportPage() {
           </h2>
           <p className="text-sm text-slate-500">
             Generated on {new Date(report.generated_at).toLocaleString()}
+            {modelName ? ` · ${modelName}` : ""}
           </p>
+          {insights.deck?.one_liner && (
+            <p className="text-sm text-slate-700 mt-1">{insights.deck.one_liner}</p>
+          )}
         </div>
         <Button onClick={downloadPDF} disabled={downloading}>
           {downloading ? "Generating PDF..." : "Download PDF"}
         </Button>
       </div>
 
+      {(insights.warnings ?? []).length > 0 && (
+        <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <p className="font-medium mb-1">Parts of this analysis did not complete — consider re-running it:</p>
+          <ul className="list-disc list-inside space-y-0.5">
+            {insights.warnings!.map((w, i) => <li key={i}>{w}</li>)}
+          </ul>
+        </div>
+      )}
+
       {/* Overall Score */}
       <Card>
         <CardContent className="py-8">
           <ScoreMeter score={report.overall_score} />
+          {insights.weighted_score !== undefined && !!insights.score_adjustment && (
+            <p className="text-xs text-slate-500 text-center mt-3">
+              Weighted criteria score {insights.weighted_score}, analyst adjustment{" "}
+              {insights.score_adjustment > 0 ? "+" : ""}{insights.score_adjustment}
+            </p>
+          )}
         </CardContent>
       </Card>
 
@@ -132,6 +162,30 @@ export default function ReportPage() {
           <p className="text-sm text-slate-600 whitespace-pre-wrap">{report.executive_summary}</p>
         </CardContent>
       </Card>
+
+      {/* Key takeaways */}
+      {takeaways.length > 0 && (
+        <Card>
+          <CardHeader>
+            <h3 className="text-lg font-semibold">Key Takeaways</h3>
+          </CardHeader>
+          <CardContent className="grid gap-6 md:grid-cols-2">
+            {takeaways.map((t) => (
+              <div key={t.title}>
+                <p className={`text-xs font-semibold uppercase mb-2 ${t.color}`}>{t.title}</p>
+                <ul className="space-y-1.5">
+                  {t.items!.map((item, i) => (
+                    <li key={i} className="flex gap-2 text-sm text-slate-700">
+                      <span className={`mt-1.5 h-1.5 w-1.5 flex-shrink-0 rounded-full ${t.dot}`} />
+                      <span>{item}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
 
       {/* 7 Criteria Breakdown */}
       <Card>

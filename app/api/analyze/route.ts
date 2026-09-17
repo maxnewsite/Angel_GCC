@@ -1,6 +1,8 @@
 import { NextRequest } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
-import { callClaude, callClaudeWithPDF } from "@/lib/anthropic";
+import { requireAdmin } from "@/lib/supabase/require-admin";
+import { callClaudeJSON, describeAIError, extractFromPDF } from "@/lib/anthropic";
+import { resolveModel } from "@/lib/models";
 import { computeWeightedScore, SCREENING_CRITERIA } from "@/lib/criteria";
 import {
   PITCH_DECK_EXTRACTION_SYSTEM,
@@ -13,398 +15,381 @@ import {
   buildRecommendationUser,
   RESEARCH_SYSTEM,
   buildResearchUser,
+  buildCompanyContext,
 } from "@/lib/prompts";
+import {
+  CRITERIA_SCHEMA,
+  EXTRACTION_SCHEMA,
+  FLAGS_SCHEMA,
+  RECOMMENDATION_SCHEMA,
+  RESEARCH_SCHEMA,
+  type CriterionResult,
+  type DeckExtraction,
+  type FlagResult,
+  type MarketResearch,
+  type RecommendationResult,
+} from "@/lib/schemas";
+import type { CriterionScore, ReportInsights, Submission } from "@/lib/types";
 
-/**
- * Returns true when the extraction result contains genuinely useful content.
- *
- * Checks performed:
- *  1. Known failure/fallback sentinel strings → not meaningful
- *  2. Parseable JSON  → at least MIN_MEANINGFUL_FIELDS fields must have a
- *     non-empty, non-placeholder value.
- *  3. Raw text fallback → must be longer than MIN_RAW_LENGTH characters.
- */
-const EXTRACTION_SENTINELS = [
-  "No pitch deck provided.",
-  "Pitch deck extraction failed.",
-];
-const PLACEHOLDER_VALUES = new Set([
-  "not provided", "n/a", "na", "none", "unknown", "null", "-", "—", "",
-]);
-const MIN_MEANINGFUL_FIELDS = 3;
-const MIN_RAW_LENGTH = 100;
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const maxDuration = 800;
 
-function isMeaningfulExtraction(data: string): boolean {
-  const trimmed = data.trim();
+const TOTAL_STEPS = 6;
+const EXTRACTION_TIMEOUT_MS = 5 * 60 * 1000;
 
-  if (EXTRACTION_SENTINELS.some((s) => trimmed.startsWith(s))) return false;
+const PLACEHOLDER_VALUES = new Set(["not provided", "n/a", "na", "none", "unknown", "null", "-", "—", ""]);
 
-  // Try to validate as a parsed JSON object
-  try {
-    const parsed = JSON.parse(trimmed);
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed))
-      return trimmed.length >= MIN_RAW_LENGTH;
+function isProvided(value: unknown): value is string {
+  return typeof value === "string" && !PLACEHOLDER_VALUES.has(value.trim().toLowerCase());
+}
 
-    const meaningful = Object.values(parsed).filter((v) => {
-      if (v === null || v === undefined) return false;
-      const s = String(v).trim().toLowerCase();
-      return s.length > 0 && !PLACEHOLDER_VALUES.has(s);
-    }).length;
+function computeExtractionStats(extraction: DeckExtraction | null) {
+  if (!extraction) return { fieldsTotal: 0, fieldsPopulated: 0, wordCount: 0 };
+  const values = Object.entries(extraction)
+    .filter(([k]) => k !== "missing_information")
+    .map(([, v]) => v);
+  return {
+    fieldsTotal: values.length,
+    fieldsPopulated: values.filter(isProvided).length,
+    wordCount: values
+      .filter(isProvided)
+      .reduce((sum, v) => sum + v.trim().split(/\s+/).length, 0),
+  };
+}
 
-    return meaningful >= MIN_MEANINGFUL_FIELDS;
-  } catch {
-    // Not JSON — accept if it has enough raw text
-    return trimmed.length >= MIN_RAW_LENGTH;
-  }
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/** Guarantees exactly one well-formed score per criterion, in catalogue order. */
+function normalizeScores(results: CriterionResult[] | null): CriterionScore[] {
+  return SCREENING_CRITERIA.map((c) => {
+    const r = results?.find((s) => s.key === c.key);
+    return {
+      criterion: c.name,
+      key: c.key,
+      weight: c.weight,
+      score: r ? Math.min(5, Math.max(1, Math.round(r.score))) : 3,
+      confidence: r?.confidence ?? "low",
+      rationale: r?.rationale ?? "Not scored — re-run the analysis to score this criterion.",
+    };
+  });
+}
+
+function founderInputsFor(s: Submission): string {
+  return [
+    s.sector ? `Sector: ${s.sector}` : "",
+    s.hq_location ? `Location: ${s.hq_location}` : "",
+    s.website ? `Website: ${s.website}` : "",
+    s.founding_date ? `Founded: ${s.founding_date}` : "",
+    s.description ? `Description: ${s.description}` : "",
+    s.team_info ? `Team: ${s.team_info}` : "",
+    s.traction_info ? `Traction: ${s.traction_info}` : "",
+    s.business_model ? `Business Model: ${s.business_model}` : "",
+    s.funding_ask ? `Funding Ask: ${s.funding_ask}` : "",
+    s.use_of_funds ? `Use of Funds: ${s.use_of_funds}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 /**
- * Computes summary metrics for the extraction result.
- * For JSON: counts total fields, populated fields, and words across all values.
- * For raw text: reports word count only (fieldsTotal/fieldsPopulated = 0).
+ * Pitches uploaded in bulk only have a file-name placeholder; fill empty
+ * submission fields from the deck so the dashboard shows real data.
  */
-function computeExtractionStats(
-  data: string
-): { fieldsTotal: number; fieldsPopulated: number; wordCount: number } {
-  const countWords = (s: string) => s.trim().split(/\s+/).filter(Boolean).length;
-
-  try {
-    const parsed = JSON.parse(data);
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      return { fieldsTotal: 0, fieldsPopulated: 0, wordCount: countWords(data) };
-    }
-
-    const values = Object.values(parsed);
-    const fieldsTotal = values.length;
-    const fieldsPopulated = values.filter((v) => {
-      if (v === null || v === undefined) return false;
-      const s = String(v).trim().toLowerCase();
-      return s.length > 0 && !PLACEHOLDER_VALUES.has(s);
-    }).length;
-    const wordCount = values.reduce((sum: number, v) => {
-      if (v === null || v === undefined) return sum;
-      return sum + countWords(String(v));
-    }, 0);
-
-    return { fieldsTotal, fieldsPopulated, wordCount };
-  } catch {
-    return { fieldsTotal: 0, fieldsPopulated: 0, wordCount: countWords(data) };
-  }
+function backfillFromDeck(s: Submission, d: DeckExtraction, hasFounderInputs: boolean) {
+  const update: Record<string, string> = {};
+  const fill = (column: keyof Submission, value: string) => {
+    if (!s[column] && isProvided(value)) update[column] = value.slice(0, 2000);
+  };
+  if (!hasFounderInputs && isProvided(d.startup_name)) update.startup_name = d.startup_name.slice(0, 200);
+  fill("website", d.website);
+  fill("sector", d.sector);
+  fill("hq_location", d.hq_location);
+  fill("description", d.one_liner);
+  fill("team_info", d.team);
+  fill("traction_info", d.traction);
+  fill("business_model", d.business_model);
+  fill("funding_ask", d.funding_ask);
+  fill("use_of_funds", d.use_of_funds);
+  return update;
 }
-
-function parseJSON(text: string) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    const match = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (match) {
-      try {
-        return JSON.parse(match[1].trim());
-      } catch { /* ignore */ }
-    }
-    const jsonMatch = text.match(/(\{[\s\S]*\}|\[[\s\S]*\])/);
-    if (jsonMatch) {
-      try {
-        return JSON.parse(jsonMatch[1]);
-      } catch { /* ignore */ }
-    }
-    throw new Error("Could not parse JSON from AI response");
-  }
-}
-
-/** Neutral fallback criteria scores used when the scoring step is unavailable */
-const FALLBACK_CRITERIA_SCORES = SCREENING_CRITERIA.map((c) => ({
-  criterion: c.name,
-  key: c.key,
-  weight: c.weight,
-  score: 3,
-  rationale: "Automated scoring unavailable — re-analyze to generate accurate scores.",
-}));
-
-const VALID_MODELS = [
-  "claude-haiku-4-5-20251001",
-  "claude-sonnet-4-6",
-  "claude-opus-4-6",
-] as const;
 
 export async function POST(request: NextRequest) {
-  const { submission_id, model } = await request.json();
+  const supabase = createServiceClient();
 
+  const denied = await requireAdmin(request, supabase);
+  if (denied) return denied;
+
+  const { submission_id, model } = await request.json().catch(() => ({}));
   if (!submission_id) {
-    return new Response(
-      JSON.stringify({ error: "submission_id required" }),
-      { status: 400, headers: { "Content-Type": "application/json" } }
-    );
+    return Response.json({ error: "submission_id required" }, { status: 400 });
   }
+  const aiModel = resolveModel(model);
 
-  // Default to Haiku if not specified or unrecognized
-  const aiModel: string = VALID_MODELS.includes(model) ? model : "claude-haiku-4-5-20251001";
+  const { data: submission, error: subErr } = await supabase
+    .from("submissions")
+    .select("*")
+    .eq("id", submission_id)
+    .single<Submission>();
+  if (subErr || !submission) {
+    return Response.json({ error: "Submission not found" }, { status: 404 });
+  }
 
   const encoder = new TextEncoder();
-  function sse(payload: object) {
-    return encoder.encode(`data: ${JSON.stringify(payload)}\n\n`);
-  }
 
   const stream = new ReadableStream({
     async start(controller) {
-      const send = (payload: object) => controller.enqueue(sse(payload));
-      const TOTAL_STEPS = 6;
+      let open = true;
+      // The client may disconnect mid-run; never let that crash the pipeline.
+      const send = (payload: object) => {
+        if (!open) return;
+        try {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(payload)}\n\n`));
+        } catch {
+          open = false;
+        }
+      };
+      const progress = (step: number, message: string) => send({ step, total: TOTAL_STEPS, message });
+      const warnings: string[] = [];
+      const warn = (step: number, message: string, err: unknown) => {
+        const detail = describeAIError(err);
+        console.error(`[analyze ${submission_id}] step ${step}: ${message}`, err);
+        warnings.push(`${message}: ${detail}`);
+        progress(step, `${message} — continuing...`);
+      };
+
+      const previousStatus = submission.status;
 
       try {
-        const supabase = createServiceClient();
-
-        // ── Fetch submission ─────────────────────────────────────────────
-        const { data: submission, error: subErr } = await supabase
+        await supabase
           .from("submissions")
-          .select("*")
-          .eq("id", submission_id)
-          .single();
-
-        if (subErr || !submission) {
-          send({ error: "Submission not found" });
-          controller.close();
-          return;
-        }
-
-        // Delete any prior report so re-runs start fresh
-        await supabase.from("analysis_reports").delete().eq("submission_id", submission_id);
+          .update({ status: "analyzing", updated_at: new Date().toISOString() })
+          .eq("id", submission_id);
 
         const { data: documents } = await supabase
           .from("documents")
           .select("*")
           .eq("submission_id", submission_id);
 
-        const founderInputs = [
-          `Startup: ${submission.startup_name}`,
-          submission.sector       ? `Sector: ${submission.sector}`             : "",
-          submission.hq_location  ? `Location: ${submission.hq_location}`      : "",
-          submission.website      ? `Website: ${submission.website}`            : "",
-          submission.description  ? `Description: ${submission.description}`   : "",
-          submission.team_info    ? `Team: ${submission.team_info}`             : "",
-          submission.traction_info? `Traction: ${submission.traction_info}`    : "",
-          submission.business_model?`Business Model: ${submission.business_model}`: "",
-          submission.funding_ask  ? `Funding Ask: ${submission.funding_ask}`   : "",
-          submission.use_of_funds ? `Use of Funds: ${submission.use_of_funds}` : "",
-        ].filter(Boolean).join("\n");
+        const founderInputs = founderInputsFor(submission);
+        const hasFounderInputs = founderInputs.length > 0;
+        let startupName = submission.startup_name;
 
-        // ── STEP 1: Pitch deck extraction (non-fatal) ────────────────────
-        send({ step: 1, total: TOTAL_STEPS, message: "Extracting pitch deck data..." });
+        // ── STEP 1: Pitch deck extraction ──────────────────────────────
+        progress(1, "Reading pitch deck...");
 
-        let extractedData = "No pitch deck provided.";
-        const pitchDeck = documents?.find(
-          (d: { file_type: string }) => d.file_type === "pitch_deck"
-        );
+        const pitchDeck =
+          documents?.find((d) => d.file_type === "pitch_deck") ??
+          documents?.find((d) => String(d.file_name).toLowerCase().endsWith(".pdf"));
+
+        let extraction: DeckExtraction | null = null;
+        let extractionError = "No pitch deck uploaded";
 
         if (pitchDeck) {
           try {
-            const { data: fileData } = await supabase.storage
+            const { data: fileData, error: dlErr } = await supabase.storage
               .from("submissions")
               .download(pitchDeck.storage_path);
+            if (dlErr || !fileData) throw new Error(`Could not download the pitch deck: ${dlErr?.message ?? "unknown error"}`);
 
-            if (fileData) {
-              const base64 = Buffer.from(await fileData.arrayBuffer()).toString("base64");
-
-              const extracted = await Promise.race([
-                callClaudeWithPDF(
-                  PITCH_DECK_EXTRACTION_SYSTEM,
-                  PITCH_DECK_EXTRACTION_USER,
-                  base64,
-                  {
-                    // PDF vision requires at least Sonnet — Haiku struggles with
-                    // visually complex slides (text on gradients/images).
-                    // Opus selection is respected; only Haiku gets upgraded.
-                    model: aiModel === "claude-haiku-4-5-20251001" ? "claude-sonnet-4-6" : aiModel,
-                    maxTokens: 4096,
-                    onChunkProgress: (chunk, total) =>
-                      send({ step: 1, total: TOTAL_STEPS, message: `Extracting pitch deck... (part ${chunk} of ${total})` }),
-                  }
-                ),
-                new Promise<never>((_, reject) =>
-                  setTimeout(() => reject(new Error("Pitch deck extraction timed out")), 90_000)
-                ),
-              ]);
-
-              try {
-                extractedData = JSON.stringify(parseJSON(extracted), null, 2);
-              } catch {
-                extractedData = extracted;
-              }
-            }
+            const base64 = Buffer.from(await fileData.arrayBuffer()).toString("base64");
+            extraction = await withTimeout(
+              extractFromPDF<DeckExtraction>(
+                PITCH_DECK_EXTRACTION_SYSTEM,
+                PITCH_DECK_EXTRACTION_USER,
+                EXTRACTION_SCHEMA,
+                base64,
+                { model: aiModel, maxTokens: 8000, onProgress: (m) => progress(1, m) }
+              ),
+              EXTRACTION_TIMEOUT_MS,
+              "Pitch deck extraction timed out"
+            );
           } catch (err) {
-            console.error("Step 1 failed:", err);
-            extractedData = "Pitch deck extraction failed. Analysis based on founder-provided information.";
-            send({ step: 1, total: TOTAL_STEPS, message: "Pitch deck extraction skipped — continuing..." });
+            extractionError = describeAIError(err);
+            warn(1, "Pitch deck extraction failed", err);
           }
         }
 
-        // ── STEP 1 — Extraction quality gate ────────────────────────────
-        if (!isMeaningfulExtraction(extractedData)) {
-          console.warn(
-            `[analyze] Extraction quality gate failed for submission ${submission_id}. ` +
-            `Content snippet: ${extractedData.slice(0, 200)}`
-          );
-          send({
-            step: 1,
-            total: TOTAL_STEPS,
-            message: "Pitch deck extraction returned insufficient content — proceeding with founder-provided data only.",
-          });
-          extractedData =
-            "Pitch deck extraction returned no meaningful content. Analysis is based exclusively on founder-provided information.";
+        if (!extraction && !hasFounderInputs) {
+          throw new Error(`Nothing to analyse — ${extractionError}.`);
         }
 
-        // Broadcast extraction stats so the UI can show inline feedback
-        const extractionStats = computeExtractionStats(extractedData);
-        send({ step: 1, total: TOTAL_STEPS, extractionStats });
+        if (extraction) {
+          const update = backfillFromDeck(submission, extraction, hasFounderInputs);
+          if (Object.keys(update).length > 0) {
+            const { error: backfillErr } = await supabase
+              .from("submissions")
+              .update(update)
+              .eq("id", submission_id);
+            if (backfillErr) console.error(`[analyze ${submission_id}] backfill failed:`, backfillErr.message);
+            else if (update.startup_name) startupName = update.startup_name;
+          }
+        }
 
-        // ── STEP 2: Market research (non-fatal) ──────────────────────────
-        send({ step: 2, total: TOTAL_STEPS, message: "Conducting market research..." });
+        send({
+          step: 1,
+          total: TOTAL_STEPS,
+          extractionStats: computeExtractionStats(extraction),
+          startup_name: startupName,
+        });
 
-        let marketResearch: Record<string, unknown> = {
+        const extractionText = extraction
+          ? JSON.stringify(extraction, null, 2)
+          : `No pitch deck content available (${extractionError}). Analyse the founder-provided information only.`;
+        const baseContext = buildCompanyContext({
+          founderInputs: hasFounderInputs ? `Startup: ${startupName}\n${founderInputs}` : "",
+          extraction: extractionText,
+        });
+
+        // ── STEP 2: Market research ────────────────────────────────────
+        progress(2, "Researching market and competitors...");
+
+        let marketResearch: MarketResearch = {
           market_size: "Unable to determine",
           competitors: [],
           trends: [],
           sources: [],
-          summary: "Market research unavailable — re-analyze to generate this section.",
+          summary: "Market research unavailable — re-run the analysis to generate this section.",
         };
-        let researchRaw = "";
-
         try {
-          researchRaw = await callClaude(
+          marketResearch = await callClaudeJSON<MarketResearch>(
             RESEARCH_SYSTEM,
-            buildResearchUser(
-              submission.startup_name,
-              submission.sector || "Technology",
-              submission.description || ""
-            ),
-            { model: aiModel, maxTokens: 3000 }
+            buildResearchUser(baseContext),
+            RESEARCH_SCHEMA,
+            { model: aiModel, maxTokens: 6000 }
           );
-          try {
-            marketResearch = parseJSON(researchRaw);
-          } catch {
-            marketResearch = { ...marketResearch, summary: researchRaw };
-          }
         } catch (err) {
-          console.error("Step 2 failed:", err);
-          send({ step: 2, total: TOTAL_STEPS, message: "Market research unavailable — continuing..." });
+          warn(2, "Market research unavailable", err);
         }
 
-        const researchData = JSON.stringify(marketResearch, null, 2);
-
-        // ── STEP 3: 7-criteria scoring (non-fatal) ───────────────────────
-        send({ step: 3, total: TOTAL_STEPS, message: "Scoring 7 investment criteria..." });
-
-        let criteriaScores: unknown[] = FALLBACK_CRITERIA_SCORES;
-        let criteriaRaw = "";
-
-        try {
-          criteriaRaw = await callClaude(
-            SEVEN_CRITERIA_SYSTEM,
-            buildSevenCriteriaUser({ founderInputs, extractedData, researchData }),
-            { model: aiModel, maxTokens: 4096 }
-          );
-          try {
-            const parsed = parseJSON(criteriaRaw);
-            criteriaScores = parsed.scores ?? parsed;
-          } catch {
-            // keep fallback scores
-          }
-        } catch (err) {
-          console.error("Step 3 failed:", err);
-          send({ step: 3, total: TOTAL_STEPS, message: "Criteria scoring unavailable — using defaults..." });
-        }
-
-        // ── STEP 4: YC flag detection (non-fatal) ────────────────────────
-        send({ step: 4, total: TOTAL_STEPS, message: "Detecting YC-style green & red flags..." });
-
-        let flagsResult: { green_flags: unknown[]; red_flags: unknown[] } = {
-          green_flags: [],
-          red_flags: [],
-        };
-        let flagsRaw = "";
-
-        try {
-          flagsRaw = await callClaude(
-            YC_FLAGS_SYSTEM,
-            buildYCFlagsUser({ founderInputs, extractedData, researchData }),
-            { model: aiModel, maxTokens: 4096 }
-          );
-          try {
-            flagsResult = parseJSON(flagsRaw);
-          } catch (parseErr) {
-            console.error("Step 4 — flag JSON parse failed:", parseErr);
-            console.error("Step 4 — raw response snippet:", flagsRaw.slice(0, 500));
-          }
-        } catch (err) {
-          console.error("Step 4 failed:", err);
-          send({ step: 4, total: TOTAL_STEPS, message: "Flag detection unavailable — continuing..." });
-        }
-
-        // ── STEP 5: Overall recommendation (non-fatal) ───────────────────
-        send({ step: 5, total: TOTAL_STEPS, message: "Generating investment recommendation..." });
-
-        const weightedScore = computeWeightedScore(
-          (criteriaScores as { key: string; score: number }[]).map((c) => ({
-            key: c.key,
-            score: c.score,
-          }))
-        );
-
-        let overallResult = {
-          overall_score: weightedScore,
-          recommendation: "Analysis partially completed. Review available criteria scores.",
-          executive_summary: "Some analysis steps were unavailable. Re-analyze for a complete report.",
-          detailed_rationale: "",
-        };
-        let overallRaw = "";
-
-        try {
-          overallRaw = await callClaude(
-            RECOMMENDATION_SYSTEM,
-            buildRecommendationUser({
-              founderInputs,
-              criteriaScores: JSON.stringify(criteriaScores, null, 2),
-              flags: JSON.stringify(flagsResult, null, 2),
-              researchData,
-            }),
-            { model: aiModel, maxTokens: 4096 }
-          );
-          try {
-            overallResult = parseJSON(overallRaw);
-          } catch {
-            overallResult = { ...overallResult, detailed_rationale: overallRaw };
-          }
-        } catch (err) {
-          console.error("Step 5 failed:", err);
-          send({ step: 5, total: TOTAL_STEPS, message: "Recommendation unavailable — saving partial results..." });
-        }
-
-        // ── STEP 6: Save report ──────────────────────────────────────────
-        send({ step: 6, total: TOTAL_STEPS, message: "Saving analysis report..." });
-
-        const { error: reportErr } = await supabase.from("analysis_reports").insert({
-          submission_id,
-          overall_score: overallResult.overall_score,
-          recommendation: overallResult.recommendation,
-          executive_summary: overallResult.executive_summary,
-          criteria_scores: criteriaScores,
-          green_flags: flagsResult.green_flags || [],
-          red_flags: flagsResult.red_flags || [],
-          market_research: marketResearch,
-          detailed_rationale: overallResult.detailed_rationale,
-          raw_ai_responses: {
-            extraction: extractedData,
-            research: researchRaw,
-            criteria: criteriaRaw,
-            flags: flagsRaw,
-            overall: overallRaw,
-          },
+        const fullContext = buildCompanyContext({
+          founderInputs: hasFounderInputs ? `Startup: ${startupName}\n${founderInputs}` : "",
+          extraction: extractionText,
+          research: JSON.stringify(marketResearch, null, 2),
         });
 
-        if (reportErr) {
-          send({ error: "Failed to save report: " + reportErr.message });
-          controller.close();
-          return;
+        // ── STEPS 3 + 4: Criteria scoring and flags run in parallel ────
+        progress(3, "Scoring 7 investment criteria...");
+
+        const criteriaPromise = callClaudeJSON<{ scores: CriterionResult[] }>(
+          SEVEN_CRITERIA_SYSTEM,
+          buildSevenCriteriaUser(fullContext),
+          CRITERIA_SCHEMA,
+          { model: aiModel, maxTokens: 6000 }
+        );
+        const flagsPromise = callClaudeJSON<{ green_flags: FlagResult[]; red_flags: FlagResult[] }>(
+          YC_FLAGS_SYSTEM,
+          buildYCFlagsUser(fullContext),
+          FLAGS_SCHEMA,
+          { model: aiModel, maxTokens: 6000 }
+        );
+        // Avoid unhandled rejections while the other call is awaited
+        criteriaPromise.catch(() => {});
+        flagsPromise.catch(() => {});
+
+        let criteriaResults: CriterionResult[] | null = null;
+        try {
+          criteriaResults = (await criteriaPromise).scores;
+        } catch (err) {
+          warn(3, "Criteria scoring failed, neutral scores used", err);
         }
+        const criteriaScores = normalizeScores(criteriaResults);
+
+        progress(4, "Detecting green & red flags...");
+        let flags: { green_flags: FlagResult[]; red_flags: FlagResult[] } = { green_flags: [], red_flags: [] };
+        try {
+          flags = await flagsPromise;
+        } catch (err) {
+          warn(4, "Flag detection unavailable", err);
+        }
+
+        // ── STEP 5: Recommendation ─────────────────────────────────────
+        progress(5, "Writing investment recommendation...");
+
+        const weightedScore = computeWeightedScore(criteriaScores);
+        let recommendation: RecommendationResult = {
+          score_adjustment: 0,
+          recommendation: "Analysis partially completed. Review the criteria scores below.",
+          executive_summary: "The recommendation step was unavailable. Re-run the analysis for a complete report.",
+          key_strengths: [],
+          key_risks: [],
+          due_diligence_questions: [],
+          detailed_rationale: "",
+        };
+        try {
+          recommendation = await callClaudeJSON<RecommendationResult>(
+            RECOMMENDATION_SYSTEM,
+            buildRecommendationUser({
+              company: fullContext,
+              criteriaScores: JSON.stringify(criteriaScores, null, 2),
+              weightedScore,
+              flags: JSON.stringify(flags, null, 2),
+            }),
+            RECOMMENDATION_SCHEMA,
+            { model: aiModel, maxTokens: 8000 }
+          );
+        } catch (err) {
+          warn(5, "Recommendation unavailable", err);
+        }
+
+        const adjustment = Math.max(-10, Math.min(10, Math.round(recommendation.score_adjustment || 0)));
+        const overallScore = Math.max(0, Math.min(100, weightedScore + adjustment));
+
+        // ── STEP 6: Save report ────────────────────────────────────────
+        progress(6, "Saving analysis report...");
+
+        const insights: ReportInsights = {
+          model: aiModel,
+          key_strengths: recommendation.key_strengths,
+          key_risks: recommendation.key_risks,
+          due_diligence_questions: recommendation.due_diligence_questions,
+          missing_information: extraction?.missing_information ?? [],
+          weighted_score: weightedScore,
+          score_adjustment: adjustment,
+          warnings,
+          deck: extraction
+            ? {
+                one_liner: extraction.one_liner,
+                stage: extraction.stage,
+                sector: extraction.sector,
+                hq_location: extraction.hq_location,
+                website: extraction.website,
+              }
+            : undefined,
+        };
+
+        const report = {
+          submission_id,
+          overall_score: overallScore,
+          recommendation: recommendation.recommendation,
+          executive_summary: recommendation.executive_summary,
+          criteria_scores: criteriaScores,
+          green_flags: flags.green_flags,
+          red_flags: flags.red_flags,
+          market_research: marketResearch,
+          detailed_rationale: recommendation.detailed_rationale,
+          raw_ai_responses: { model: aiModel, extraction, warnings },
+          insights,
+        };
+
+        // Remove the previous report only once the new one is ready
+        await supabase.from("analysis_reports").delete().eq("submission_id", submission_id);
+
+        let { error: reportErr } = await supabase.from("analysis_reports").insert(report);
+        if (reportErr && reportErr.message.includes("insights")) {
+          // Database not yet migrated (supabase/migration_report_insights.sql)
+          console.warn("[analyze] insights column missing — saving without it");
+          const { insights: _omit, ...legacyReport } = report;
+          void _omit;
+          ({ error: reportErr } = await supabase.from("analysis_reports").insert(legacyReport));
+        }
+        if (reportErr) throw new Error("Failed to save report: " + reportErr.message);
 
         await supabase
           .from("submissions")
@@ -414,17 +399,30 @@ export async function POST(request: NextRequest) {
         send({
           step: TOTAL_STEPS,
           total: TOTAL_STEPS,
-          message: "Analysis complete!",
+          message: warnings.length ? `Analysis complete with ${warnings.length} warning(s)` : "Analysis complete!",
           done: true,
-          overall_score: overallResult.overall_score,
-          recommendation: overallResult.recommendation,
+          overall_score: overallScore,
+          recommendation: recommendation.recommendation,
+          startup_name: startupName,
         });
-
       } catch (err) {
-        console.error("Analysis error:", err);
-        send({ error: err instanceof Error ? err.message : "Analysis failed" });
+        console.error(`[analyze ${submission_id}] failed:`, err);
+        await supabase
+          .from("submissions")
+          .update({
+            status: previousStatus === "analyzing" ? "in_review" : previousStatus,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", submission_id);
+        send({ error: describeAIError(err) });
       } finally {
-        controller.close();
+        if (open) {
+          try {
+            controller.close();
+          } catch {
+            /* already closed */
+          }
+        }
       }
     },
   });
@@ -432,8 +430,9 @@ export async function POST(request: NextRequest) {
   return new Response(stream, {
     headers: {
       "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
+      "Cache-Control": "no-cache, no-transform",
       Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
     },
   });
 }

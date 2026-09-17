@@ -10,6 +10,8 @@ import { Card, CardHeader, CardContent } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import type { Submission, Document } from "@/lib/types";
+import { runAnalysis, type ExtractionStats } from "@/lib/api-client";
+import { DEFAULT_MODEL, MODELS } from "@/lib/models";
 
 export default function ReviewPage() {
   const { id } = useParams<{ id: string }>();
@@ -23,8 +25,8 @@ export default function ReviewPage() {
   const [analyzeProgress, setAnalyzeProgress] = useState("");
   const [analyzeStep, setAnalyzeStep] = useState(0);
   const [analyzeTotal, setAnalyzeTotal] = useState(6);
-  const [selectedModel, setSelectedModel] = useState("claude-haiku-4-5-20251001");
-  const [extractionStats, setExtractionStats] = useState<{ fieldsTotal: number; fieldsPopulated: number; wordCount: number } | null>(null);
+  const [selectedModel, setSelectedModel] = useState<string>(DEFAULT_MODEL);
+  const [extractionStats, setExtractionStats] = useState<ExtractionStats | null>(null);
   const [rejecting, setRejecting] = useState(false);
   const [showRejectConfirm, setShowRejectConfirm] = useState(false);
   const [rejectReason, setRejectReason] = useState("");
@@ -93,63 +95,21 @@ export default function ReviewPage() {
     setAnalyzeStep(0);
     setAnalyzeProgress("Starting AI analysis...");
     setExtractionStats(null);
-
-    await supabase
-      .from("submissions")
-      .update({ status: "analyzing", updated_at: new Date().toISOString() })
-      .eq("id", id);
     setSubmission((prev) => prev ? { ...prev, status: "analyzing" } : prev);
 
     try {
-      const response = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ submission_id: id, model: selectedModel }),
+      await runAnalysis(id, selectedModel, (event) => {
+        if (event.step !== undefined) setAnalyzeStep(event.step);
+        if (event.total !== undefined) setAnalyzeTotal(event.total);
+        if (event.message) setAnalyzeProgress(event.message);
+        if (event.extractionStats) setExtractionStats(event.extractionStats);
       });
-
-      if (!response.body) throw new Error("No response stream");
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? ""; // keep incomplete last line
-
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          const data = JSON.parse(line.slice(6)) as {
-            step?: number;
-            total?: number;
-            message?: string;
-            done?: boolean;
-            error?: string;
-            extractionStats?: { fieldsTotal: number; fieldsPopulated: number; wordCount: number };
-          };
-
-          if (data.error) throw new Error(data.error);
-          if (data.step !== undefined) setAnalyzeStep(data.step);
-          if (data.total !== undefined) setAnalyzeTotal(data.total);
-          if (data.message) setAnalyzeProgress(data.message);
-          if (data.extractionStats) setExtractionStats(data.extractionStats);
-
-          if (data.done) {
-            setTimeout(() => router.push(`/admin/report/${id}`), 1200);
-          }
-        }
-      }
+      setTimeout(() => router.push(`/admin/report/${id}`), 1200);
     } catch (err) {
+      // The server restores the previous status when a run fails
       setAnalyzeError(err instanceof Error ? err.message : "Analysis failed");
-      await supabase
-        .from("submissions")
-        .update({ status: "in_review", updated_at: new Date().toISOString() })
-        .eq("id", id);
-      setSubmission((prev) => prev ? { ...prev, status: "in_review" } : prev);
+      const { data: sub } = await supabase.from("submissions").select("status").eq("id", id).single();
+      if (sub) setSubmission((prev) => prev ? { ...prev, status: sub.status } : prev);
       setAnalyzing(false);
     }
   }
@@ -473,11 +433,7 @@ export default function ReviewPage() {
                   AI Model
                 </label>
                 <div className="grid grid-cols-3 gap-2">
-                  {[
-                    { id: "claude-haiku-4-5-20251001", label: "Haiku 4.5", desc: "Fast · Economical" },
-                    { id: "claude-sonnet-4-6",         label: "Sonnet 4.6", desc: "Balanced · Recommended" },
-                    { id: "claude-opus-4-6",           label: "Opus 4.6",  desc: "Most Capable · Slower" },
-                  ].map((m) => (
+                  {MODELS.map((m) => (
                     <button
                       key={m.id}
                       onClick={() => setSelectedModel(m.id)}
@@ -488,9 +444,9 @@ export default function ReviewPage() {
                       }`}
                     >
                       <div className={`text-sm font-semibold ${selectedModel === m.id ? "text-blue-700" : "text-slate-700"}`}>
-                        {m.label}
+                        {m.name}
                       </div>
-                      <div className="text-xs text-slate-500 mt-0.5">{m.desc}</div>
+                      <div className="text-xs text-slate-500 mt-0.5">{m.tagline}</div>
                     </button>
                   ))}
                 </div>
