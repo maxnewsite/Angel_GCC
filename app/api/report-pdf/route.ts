@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createServiceClient } from "@/lib/supabase/server";
+import { requireAdmin } from "@/lib/supabase/require-admin";
 import PDFDocument from "pdfkit";
 import type { Submission, AnalysisReport, CriterionScore, Flag } from "@/lib/types";
 
@@ -225,6 +226,25 @@ function buildPDF(submission: Submission, report: AnalysisReport): Promise<Buffe
 
     // ── PAGE 5: Detailed Analysis ──────────────────────────────────────────
     doc.addPage();
+    const takeaways: [string, string[] | undefined, string][] = [
+      ["Key Strengths", report.insights?.key_strengths, "#16a34a"],
+      ["Key Risks", report.insights?.key_risks, "#dc2626"],
+      ["Due Diligence Questions", report.insights?.due_diligence_questions, "#1d4ed8"],
+      ["Missing From the Deck", report.insights?.missing_information, "#64748b"],
+    ];
+    if (takeaways.some(([, items]) => (items ?? []).length > 0)) {
+      sectionTitle(doc, "Key Takeaways");
+      for (const [title, items, titleColor] of takeaways) {
+        if (!items?.length) continue;
+        subTitle(doc, title, titleColor);
+        for (const item of items) {
+          doc.font("Helvetica").fontSize(10).fillColor("#334155").text(`•  ${item}`, { lineGap: 2 });
+        }
+        doc.moveDown(0.5);
+      }
+      doc.moveDown(0.5);
+    }
+
     sectionTitle(doc, "Detailed Analysis");
     doc
       .font("Helvetica")
@@ -336,6 +356,8 @@ export async function POST(request: NextRequest) {
     }
 
     const supabase = createServiceClient();
+    const denied = await requireAdmin(request, supabase);
+    if (denied) return denied;
 
     const { data: submission } = await supabase
       .from("submissions")

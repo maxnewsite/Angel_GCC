@@ -10,6 +10,24 @@ import { Card, CardContent } from "@/components/ui/Card";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import type { Submission } from "@/lib/types";
+import { authFetch, runAnalysis, type ExtractionStats } from "@/lib/api-client";
+import { DEFAULT_MODEL, MODELS } from "@/lib/models";
+
+type Row = Omit<Submission, "analysis_reports" | "profiles"> & {
+  profiles: { email: string; full_name: string | null } | null;
+  analysis_reports: { overall_score: number | null }[] | null;
+};
+
+function scoreOf(row: Row): number | null {
+  return row.analysis_reports?.[0]?.overall_score ?? null;
+}
+
+function scoreClass(score: number): string {
+  if (score >= 80) return "bg-green-100 text-green-700";
+  if (score >= 60) return "bg-orange-100 text-orange-700";
+  if (score >= 40) return "bg-yellow-100 text-yellow-700";
+  return "bg-red-100 text-red-700";
+}
 
 const STATUS_BADGES: Record<string, { label: string; variant: "default" | "secondary" | "warning" | "success" | "destructive" }> = {
   submitted: { label: "Submitted", variant: "secondary" },
@@ -19,45 +37,25 @@ const STATUS_BADGES: Record<string, { label: string; variant: "default" | "secon
   rejected: { label: "Rejected", variant: "destructive" },
 };
 
-const MODELS = [
-  {
-    id: "claude-haiku-4-5-20251001",
-    name: "Haiku 4.5",
-    tagline: "Fast & Efficient",
-    description: "Best for quick screening, lower cost",
-  },
-  {
-    id: "claude-sonnet-4-6",
-    name: "Sonnet 4.6",
-    tagline: "Balanced",
-    description: "Great balance of quality and speed",
-  },
-  {
-    id: "claude-opus-4-6",
-    name: "Opus 4.6",
-    tagline: "Most Capable",
-    description: "Highest quality, best for key decisions",
-  },
-];
-
 export default function AdminDashboard() {
-  const [submissions, setSubmissions] = useState<(Submission & { profiles: { email: string; full_name: string | null } })[]>([]);
+  const [submissions, setSubmissions] = useState<Row[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<string>("all");
+  const [sortBy, setSortBy] = useState<"date" | "score">("date");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string>("");
 
   // Re-run state
   const [rerunId, setRerunId] = useState<string | null>(null);
-  const [rerunModel, setRerunModel] = useState("claude-haiku-4-5-20251001");
+  const [rerunModel, setRerunModel] = useState<string>(DEFAULT_MODEL);
   const [rerunning, setRerunning] = useState(false);
   const [rerunStep, setRerunStep] = useState(0);
   const [rerunTotal, setRerunTotal] = useState(6);
   const [rerunMessage, setRerunMessage] = useState("");
   const [rerunError, setRerunError] = useState("");
   const [rerunDone, setRerunDone] = useState(false);
-  const [rerunExtractionStats, setRerunExtractionStats] = useState<{ fieldsTotal: number; fieldsPopulated: number; wordCount: number } | null>(null);
+  const [rerunExtractionStats, setRerunExtractionStats] = useState<ExtractionStats | null>(null);
   const rerunAbortRef = useRef<AbortController | null>(null);
 
   const supabase = createClient();
@@ -67,7 +65,7 @@ export default function AdminDashboard() {
     async function load() {
       const { data } = await supabase
         .from("submissions")
-        .select("*, profiles(email, full_name)")
+        .select("*, profiles(email, full_name), analysis_reports(overall_score)")
         .order("created_at", { ascending: false });
       setSubmissions(data || []);
       setLoading(false);
@@ -80,7 +78,7 @@ export default function AdminDashboard() {
     setDeleteError("");
 
     try {
-      const res = await fetch("/api/delete-submission", {
+      const res = await authFetch("/api/delete-submission", {
         method: "DELETE",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ submission_id: id }),
@@ -102,7 +100,7 @@ export default function AdminDashboard() {
 
   function openRerun(id: string) {
     setRerunId(id);
-    setRerunModel("claude-haiku-4-5-20251001");
+    setRerunModel(DEFAULT_MODEL);
     setRerunning(false);
     setRerunStep(0);
     setRerunTotal(6);
@@ -133,56 +131,29 @@ export default function AdminDashboard() {
 
     const abort = new AbortController();
     rerunAbortRef.current = abort;
+    const id = rerunId;
 
     try {
-      const res = await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ submission_id: rerunId, model: rerunModel }),
-        signal: abort.signal,
-      });
-
-      if (!res.ok || !res.body) {
-        const errData = await res.json().catch(() => null);
-        throw new Error(errData?.error || "Analysis request failed");
-      }
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const payload = JSON.parse(line.slice(6));
-            if (payload.error) {
-              setRerunError(payload.error);
-              setRerunning(false);
-              return;
-            }
-            if (payload.step) setRerunStep(payload.step);
-            if (payload.total) setRerunTotal(payload.total);
-            if (payload.message) setRerunMessage(payload.message);
-            if (payload.extractionStats) setRerunExtractionStats(payload.extractionStats);
-            if (payload.done) {
-              setRerunDone(true);
-              setRerunning(false);
-              // Update local submission status to completed
-              setSubmissions((prev) =>
-                prev.map((s) => s.id === rerunId ? { ...s, status: "completed" } : s)
-              );
-            }
-          } catch { /* ignore malformed lines */ }
-        }
-      }
+      const final = await runAnalysis(id, rerunModel, (event) => {
+        if (event.step) setRerunStep(event.step);
+        if (event.total) setRerunTotal(event.total);
+        if (event.message) setRerunMessage(event.message);
+        if (event.extractionStats) setRerunExtractionStats(event.extractionStats);
+      }, abort.signal);
+      setRerunDone(true);
+      setRerunning(false);
+      setSubmissions((prev) =>
+        prev.map((s) =>
+          s.id === id
+            ? {
+                ...s,
+                status: "completed",
+                startup_name: final.startup_name ?? s.startup_name,
+                analysis_reports: [{ overall_score: final.overall_score ?? null }],
+              }
+            : s
+        )
+      );
     } catch (err) {
       if ((err as Error).name !== "AbortError") {
         setRerunError(err instanceof Error ? err.message : "Analysis failed");
@@ -191,15 +162,37 @@ export default function AdminDashboard() {
     }
   }
 
-  const filtered = filter === "all" ? submissions : submissions.filter((s) => s.status === filter);
+  const filtered = (filter === "all" ? submissions : submissions.filter((s) => s.status === filter))
+    .slice()
+    .sort((a, b) =>
+      sortBy === "score"
+        ? (scoreOf(b) ?? -1) - (scoreOf(a) ?? -1)
+        : new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+    );
 
   const rerunSubmission = submissions.find((s) => s.id === rerunId);
 
   return (
     <div>
-      <div className="mb-6">
-        <h2 className="text-2xl font-bold text-slate-900">Admin Dashboard</h2>
-        <p className="text-sm text-slate-500">Review and manage all startup submissions</p>
+      <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h2 className="text-2xl font-bold text-slate-900">Admin Dashboard</h2>
+          <p className="text-sm text-slate-500">Review and manage all startup submissions</p>
+        </div>
+        <div className="flex items-center gap-3">
+          <label className="text-sm text-slate-500">
+            Sort by{" "}
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value as "date" | "score")}
+              className="ml-1 rounded-lg border border-slate-200 bg-white px-2 py-1.5 text-sm text-slate-700"
+            >
+              <option value="date">Newest first</option>
+              <option value="score">Highest score</option>
+            </select>
+          </label>
+          <Button onClick={() => router.push("/admin/bulk")}>Bulk Upload Pitches</Button>
+        </div>
       </div>
 
       {/* Stats */}
@@ -241,6 +234,7 @@ export default function AdminDashboard() {
                 <th className="text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase">Sector</th>
                 <th className="text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase">Submitted</th>
                 <th className="text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase">Status</th>
+                <th className="text-left px-6 py-3 text-xs font-semibold text-slate-500 uppercase">Score</th>
                 <th className="text-right px-6 py-3 text-xs font-semibold text-slate-500 uppercase">Actions</th>
               </tr>
             </thead>
@@ -274,6 +268,15 @@ export default function AdminDashboard() {
                     </td>
                     <td className="px-6 py-4">
                       <Badge variant={status.variant}>{status.label}</Badge>
+                    </td>
+                    <td className="px-6 py-4">
+                      {scoreOf(sub) !== null ? (
+                        <span className={`inline-block rounded-lg px-2 py-1 text-sm font-bold ${scoreClass(scoreOf(sub)!)}`}>
+                          {scoreOf(sub)}
+                        </span>
+                      ) : (
+                        <span className="text-sm text-slate-400">-</span>
+                      )}
                     </td>
                     <td className="px-6 py-4 text-right">
                       {isPendingDelete ? (

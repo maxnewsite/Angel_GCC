@@ -18,6 +18,7 @@ const NAV_ITEMS = {
   ],
   admin: [
     { label: "Dashboard", href: "/admin/dashboard" },
+    { label: "Bulk Screening", href: "/admin/bulk" },
   ],
 };
 

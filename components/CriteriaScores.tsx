@@ -21,6 +21,14 @@ export function CriteriaScores({ scores }: { scores: CriterionScore[] }) {
             <div className="flex items-center gap-2">
               <span className="text-sm font-medium text-slate-700">{s.criterion}</span>
               <span className="text-[10px] text-slate-400">weight: {s.weight}x</span>
+              {s.confidence === "low" && (
+                <span
+                  className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-medium text-amber-700"
+                  title="Little evidence was available for this score"
+                >
+                  low confidence
+                </span>
+              )}
             </div>
             <span className="text-lg font-bold text-slate-900">{s.score}/5</span>
           </div>

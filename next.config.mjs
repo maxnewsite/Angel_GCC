@@ -1,3 +1,9 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+// Pin the project root so a stray lockfile in a parent folder is never used
+const projectRoot = path.dirname(fileURLToPath(import.meta.url));
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   output: 'standalone', // Required for Docker/Cloud Run deployment
@@ -6,8 +12,8 @@ const nextConfig = {
   // does not attempt to bundle it for the browser bundle.
   serverExternalPackages: ["pdfkit"],
 
-  // Next.js 16 uses Turbopack by default, add empty config to silence warning
-  turbopack: {},
+  outputFileTracingRoot: projectRoot,
+  turbopack: { root: projectRoot },
 
   // Keep webpack config for compatibility (only used in webpack mode)
   webpack: (config) => {
