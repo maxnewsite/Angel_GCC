@@ -169,7 +169,7 @@ POST /functions/v1/ai-screen-deal
 // 4. PDF attachment for analysis
 
 // Uses Claude Haiku (Line 160)
-// model: "claude-haiku-4-5-20251001"
+// model: "claude-haiku-5-5"
 
 // AI must return JSON with:
 // - analyses[] array (one per criterion)
@@ -301,7 +301,7 @@ POST /functions/v1/ai-detect-flags
 
 #### Claude Model Used (Line 131):
 ```typescript
-model: "claude-haiku-4-5-20251001"  // Fast model for flag detection
+model: "claude-haiku-5-5"  // Fast model for flag detection
 max_tokens: 2048
 ```
 
