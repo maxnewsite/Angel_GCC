@@ -157,7 +157,7 @@
 │ 3. Fetch 7 screening criteria from DB (Line 87-92)                                 │
 │ 4. Build prompt with criteria definitions (Line 108-146)                           │
 │ 5. Call Claude Haiku API (Line 154-189)                                            │
-│    model: "claude-haiku-4-5-20251001"                                              │
+│    model: "claude-haiku-5-5"                                              │
 │ 6. Parse JSON response (Line 231-250)                                              │
 │ 7. Map scores to criteria IDs (Line 253-280)                                       │
 │ 8. Calculate weighted overall score (Line 285-287)                                 │
@@ -226,7 +226,7 @@
 │ 3. Build YC-analyst prompt (Line 73-118)                                           │
 │    Instructions: "Identify 3-5 green + 3-5 red flags"                              │
 │ 4. Call Claude Haiku API (Line 159-167)                                            │
-│    model: "claude-haiku-4-5-20251001"                                              │
+│    model: "claude-haiku-5-5"                                              │
 │    Send PDF if available, otherwise just text                                      │
 │ 5. Parse JSON response (Line 181-193)                                              │
 │ 6. Return to frontend (Line 195-201)                                               │

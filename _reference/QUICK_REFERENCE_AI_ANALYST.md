@@ -90,7 +90,7 @@ What it does:
 3. AI scores each criterion 1-5
 4. Returns: criteria_scores[] + overall_assessment
 
-Model: claude-haiku-4-5-20251001
+Model: claude-haiku-5-5
 Output: Populates the analysis notes textarea for each criterion
 ```
 
@@ -124,7 +124,7 @@ What it does:
 3. AI identifies 3-5 green + 3-5 red flags
 4. Returns: green_flags[] + red_flags[]
 
-Model: claude-haiku-4-5-20251001
+Model: claude-haiku-5-5
 Output: Populates green_flags and red_flags in UI
 ```
 
